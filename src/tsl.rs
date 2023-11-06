@@ -1,13 +1,15 @@
 use std::net::SocketAddr;
 
 use native_tls::TlsConnector;
-use tokio::net::TcpStream;
-use tokio_native_tls::TlsStream;
+use tokio::{
+    io::{AsyncRead, AsyncWrite},
+    net::TcpStream,
+};
 
 pub async fn connect_without_sni(
     addr: SocketAddr,
     domain: &str,
-) -> anyhow::Result<TlsStream<TcpStream>> {
+) -> anyhow::Result<impl AsyncRead + AsyncWrite + Send + Sync + Unpin> {
     let connector = TlsConnector::builder()
         .use_sni(false)
         .danger_accept_invalid_certs(true)
