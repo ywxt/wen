@@ -58,3 +58,35 @@ impl DnsResolver {
             .context("No IP found by DNS lookup")
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::{
+        net::{Ipv4Addr, Ipv6Addr},
+        str::FromStr,
+    };
+
+    #[tokio::test]
+    async fn test_lookup_ipv6() {
+        let config = ResolverConfig::google_tls();
+        let resolver = DnsResolver::new(config, true);
+        let ip = resolver.lookup("ipv6.lookup.test-ipv6.com").await.unwrap();
+        assert!(
+            ip == IpAddr::V6(Ipv6Addr::from_str("2a00:dd80:3c::b3f").unwrap())
+                || ip == IpAddr::V6(Ipv6Addr::from_str("2001:470:1:18::223:250").unwrap())
+        );
+    }
+
+    #[tokio::test]
+    async fn test_lookup_ipv4() {
+        let config = ResolverConfig::google_tls();
+        let resolver = DnsResolver::new(config, false);
+        let ip = resolver.lookup("ipv4.lookup.test-ipv6.com").await.unwrap();
+        println!("{:?}", ip);
+        assert!(
+            ip == IpAddr::V4(Ipv4Addr::new(176, 58, 89, 223))
+                || ip == IpAddr::V4(Ipv4Addr::new(216, 218, 223, 250))
+        );
+    }
+}
