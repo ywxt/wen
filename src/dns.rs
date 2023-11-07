@@ -9,7 +9,6 @@ use hickory_resolver::{
 
 #[derive(Debug)]
 pub struct DnsResolver {
-    ipv6_supported: bool,
     inner: TokioAsyncResolver,
 }
 
@@ -24,10 +23,7 @@ impl DnsResolver {
             LookupIpStrategy::Ipv4Only
         };
         let inner = TokioAsyncResolver::tokio(resolver_config, opts);
-        Self {
-            ipv6_supported,
-            inner,
-        }
+        Self { inner }
     }
     #[cfg(any(unix, target_os = "windows"))]
     pub fn from_system_config(ipv6_supported: bool) -> anyhow::Result<Self> {
@@ -40,14 +36,7 @@ impl DnsResolver {
         };
         let inner =
             TokioAsyncResolver::new_with_conn(conf, opts, TokioConnectionProvider::default());
-        Ok(Self {
-            ipv6_supported,
-            inner,
-        })
-    }
-
-    pub fn ipv6_supported(&self) -> bool {
-        self.ipv6_supported
+        Ok(Self { inner })
     }
 
     pub async fn lookup(&self, host: &str) -> anyhow::Result<IpAddr> {
