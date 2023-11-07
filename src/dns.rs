@@ -1,11 +1,15 @@
-use std::net::IpAddr;
+use std::net::{IpAddr, SocketAddr};
 
 use anyhow::Context;
 use hickory_resolver::{
-    config::{LookupIpStrategy, ResolverConfig, ResolverOpts},
+    config::{
+        LookupIpStrategy, NameServerConfig, Protocol, ResolverConfig,
+        ResolverOpts,
+    },
     name_server::TokioConnectionProvider,
     system_conf, TokioAsyncResolver,
 };
+use log::debug;
 
 #[derive(Debug)]
 pub struct DnsResolver {
@@ -40,12 +44,55 @@ impl DnsResolver {
     }
 
     pub async fn lookup(&self, host: &str) -> anyhow::Result<IpAddr> {
+        debug!("DnsResolver: DNS lookup {}", host);
         let lookup = self.inner.lookup_ip(host).await?;
-        lookup
+        let result = lookup
             .into_iter()
             .next()
-            .context("No IP found by DNS lookup")
+            .context("No IP found by DNS lookup");
+        debug!("DnsResolver: DNS lookup result: {:?}", result);
+        result
     }
+}
+
+/// DNS server
+/// 
+/// This is a simplified version of `NameServerConfig` from `hickory_resolver` crate
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DnsServer {
+    Clear {
+        address: SocketAddr,
+    },
+    Tls {
+        address: SocketAddr,
+        tls_name: String,
+    },
+}
+
+/// Create a resolver config from a list of DNS servers
+pub fn create_resolver_config(dns_servers: &[DnsServer]) -> ResolverConfig {
+    let group: Vec<NameServerConfig> = dns_servers
+        .iter()
+        .map(|dns_server| match dns_server {
+            DnsServer::Clear { address } => NameServerConfig {
+                socket_addr: *address,
+                protocol: Protocol::Udp,
+                tls_dns_name: None,
+                trust_negative_responses: false,
+                bind_addr: None,
+                tls_config: None,
+            },
+            DnsServer::Tls { address, tls_name } => NameServerConfig {
+                socket_addr: *address,
+                protocol: Protocol::Tls,
+                tls_dns_name: Some(tls_name.clone()),
+                trust_negative_responses: false,
+                bind_addr: None,
+                tls_config: None,
+            },
+        })
+        .collect();
+    ResolverConfig::from_parts(None, vec![], group)
 }
 
 #[cfg(test)]

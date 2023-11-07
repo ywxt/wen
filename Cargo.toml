@@ -6,9 +6,15 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-native-tls = "0.2"
+rustls = "0.21"
 tokio = { version = "1", features = ["full"] }
-tokio-native-tls = "0.3"
+tokio-rustls = "0.24"
+rustls-native-certs = "0.6"
+hickory-resolver = { version = "0.24", features = [
+    "dns-over-rustls",
+    "dns-over-https-rustls",
+] }
+
 anyhow = "1"
 
-hickory-resolver ={ version = "0.24", features = ["dns-over-native-tls"]}
+log = "0.4"
