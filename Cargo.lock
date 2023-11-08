@@ -911,10 +911,9 @@ dependencies = [
  "anyhow",
  "hickory-resolver",
  "log",
- "rustls",
  "rustls-native-certs",
+ "thiserror",
  "tokio",
- "tokio-rustls",
 ]
 
 [[package]]

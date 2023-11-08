@@ -1,18 +1,12 @@
-use std::{
-    net::{IpAddr, SocketAddr},
-    sync::Arc,
-};
+use std::net::{IpAddr, SocketAddr};
 
 use anyhow::Context;
 use hickory_resolver::{
-    config::{
-        LookupIpStrategy, NameServerConfig, Protocol, ResolverConfig, ResolverOpts, TlsClientConfig,
-    },
+    config::{LookupIpStrategy, NameServerConfig, Protocol, ResolverConfig, ResolverOpts},
     name_server::TokioConnectionProvider,
     system_conf, TokioAsyncResolver,
 };
 use log::debug;
-use rustls::ClientConfig;
 
 #[derive(Debug)]
 pub struct DnsResolver {
@@ -63,41 +57,49 @@ impl DnsResolver {
 /// This is a simplified version of `NameServerConfig` from `hickory_resolver` crate
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DnsServer {
-    Clear {
+    Udp {
         address: SocketAddr,
     },
     Tls {
         address: SocketAddr,
-        tls_name: String,
+        dns_name: String,
+    },
+    Https {
+        address: SocketAddr,
+        dns_name: String,
     },
 }
 
 /// Create a resolver config from a list of DNS servers.
 ///
 /// Please ensure certificates included in `tls_config` are trusted by your system.
-pub fn create_resolver_config(
-    dns_servers: &[DnsServer],
-    tls_config: impl Into<Arc<ClientConfig>>,
-) -> ResolverConfig {
-    let tls_config = tls_config.into();
+pub fn create_resolver_config(dns_servers: impl IntoIterator<Item = DnsServer>) -> ResolverConfig {
     let group: Vec<NameServerConfig> = dns_servers
-        .iter()
+        .into_iter()
         .map(|dns_server| match dns_server {
-            DnsServer::Clear { address } => NameServerConfig {
-                socket_addr: *address,
+            DnsServer::Udp { address } => NameServerConfig {
+                socket_addr: address,
                 protocol: Protocol::Udp,
                 tls_dns_name: None,
                 trust_negative_responses: true,
                 bind_addr: None,
                 tls_config: None,
             },
-            DnsServer::Tls { address, tls_name } => NameServerConfig {
-                socket_addr: *address,
+            DnsServer::Tls { address, dns_name } => NameServerConfig {
+                socket_addr: address,
                 protocol: Protocol::Tls,
-                tls_dns_name: Some(tls_name.clone()),
+                tls_dns_name: Some(dns_name),
                 trust_negative_responses: true,
                 bind_addr: None,
-                tls_config: Some(TlsClientConfig(tls_config.clone())),
+                tls_config: None,
+            },
+            DnsServer::Https { address, dns_name } => NameServerConfig {
+                socket_addr: address,
+                protocol: Protocol::Https,
+                tls_dns_name: Some(dns_name),
+                trust_negative_responses: true,
+                tls_config: None,
+                bind_addr: None,
             },
         })
         .collect();
