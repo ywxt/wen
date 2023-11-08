@@ -13,6 +13,7 @@ rustls-native-certs = "0.6"
 hickory-resolver = { version = "0.24", features = [
     "dns-over-rustls",
     "dns-over-https-rustls",
+    "native-certs"
 ] }
 
 anyhow = "1"

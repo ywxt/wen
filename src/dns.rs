@@ -1,15 +1,18 @@
-use std::net::{IpAddr, SocketAddr};
+use std::{
+    net::{IpAddr, SocketAddr},
+    sync::Arc,
+};
 
 use anyhow::Context;
 use hickory_resolver::{
     config::{
-        LookupIpStrategy, NameServerConfig, Protocol, ResolverConfig,
-        ResolverOpts,
+        LookupIpStrategy, NameServerConfig, Protocol, ResolverConfig, ResolverOpts, TlsClientConfig,
     },
     name_server::TokioConnectionProvider,
     system_conf, TokioAsyncResolver,
 };
 use log::debug;
+use rustls::ClientConfig;
 
 #[derive(Debug)]
 pub struct DnsResolver {
@@ -56,7 +59,7 @@ impl DnsResolver {
 }
 
 /// DNS server
-/// 
+///
 /// This is a simplified version of `NameServerConfig` from `hickory_resolver` crate
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DnsServer {
@@ -69,8 +72,14 @@ pub enum DnsServer {
     },
 }
 
-/// Create a resolver config from a list of DNS servers
-pub fn create_resolver_config(dns_servers: &[DnsServer]) -> ResolverConfig {
+/// Create a resolver config from a list of DNS servers.
+///
+/// Please ensure certificates included in `tls_config` are trusted by your system.
+pub fn create_resolver_config(
+    dns_servers: &[DnsServer],
+    tls_config: impl Into<Arc<ClientConfig>>,
+) -> ResolverConfig {
+    let tls_config = tls_config.into();
     let group: Vec<NameServerConfig> = dns_servers
         .iter()
         .map(|dns_server| match dns_server {
@@ -78,7 +87,7 @@ pub fn create_resolver_config(dns_servers: &[DnsServer]) -> ResolverConfig {
                 socket_addr: *address,
                 protocol: Protocol::Udp,
                 tls_dns_name: None,
-                trust_negative_responses: false,
+                trust_negative_responses: true,
                 bind_addr: None,
                 tls_config: None,
             },
@@ -86,9 +95,9 @@ pub fn create_resolver_config(dns_servers: &[DnsServer]) -> ResolverConfig {
                 socket_addr: *address,
                 protocol: Protocol::Tls,
                 tls_dns_name: Some(tls_name.clone()),
-                trust_negative_responses: false,
+                trust_negative_responses: true,
                 bind_addr: None,
-                tls_config: None,
+                tls_config: Some(TlsClientConfig(tls_config.clone())),
             },
         })
         .collect();

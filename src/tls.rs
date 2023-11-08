@@ -26,18 +26,20 @@ pub async fn connect_with_client_config(
 
 pub fn load_native_root_certificates() -> RootCertStore {
     let mut roots = rustls::RootCertStore::empty();
-    for cert in rustls_native_certs::load_native_certs().expect("Could not load platform certs.") {
-        roots.add(&rustls::Certificate(cert.0)).unwrap();
-    }
+    roots.add_parsable_certificates(&rustls_native_certs::load_native_certs().expect("Could not load platform certs."));
+    
     roots
 }
 
-pub fn create_client_config_without_sni(root_store: impl Into<Arc<RootCertStore>>) -> ClientConfig {
+pub fn create_client_config(
+    root_store: impl Into<Arc<RootCertStore>>,
+    enable_sni: bool,
+) -> ClientConfig {
     let mut config = ClientConfig::builder()
         .with_safe_defaults()
         .with_root_certificates(root_store)
         .with_no_client_auth();
-    config.enable_sni = false;
+    config.enable_sni = enable_sni;
     config
 }
 
@@ -51,7 +53,7 @@ mod tests {
     async fn test_connect_without_sni() {
         let addr = SocketAddr::from(([23, 49, 124, 204], 443));
         let root_store = super::load_native_root_certificates();
-        let client_config = super::create_client_config_without_sni(root_store);
+        let client_config = super::create_client_config(root_store, false);
         let domain = "steamcommunity.com";
         let mut stream = super::connect_with_client_config(addr, domain, client_config)
             .await
