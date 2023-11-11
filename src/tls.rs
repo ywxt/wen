@@ -9,16 +9,55 @@ use crate::utils::u32_to_tls_handshake_len;
 pub struct Connection<S> {
     stream: S,
     inner: SocketConnection,
+    buffer: Vec<u8>,
 }
 
 impl<S> Connection<S>
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
+    /// Removes the server name if the connection TLS connection.
+    pub fn remove_server_name(&mut self, removed: impl Fn(&Vec<(u8, String)>) -> bool) {
+        if let SocketConnection::TlsConnection(ref mut tls) = self.inner {
+            tls.remove_server_name(removed);
+        }
+    }
+
     async fn receive_client_hello(stream: &mut S) -> Result<TlsConnection, TlsConnectionError> {
         TlsConnection::read(stream).await
     }
-    
+
+    pub async fn upgrade(stream: S) -> std::io::Result<Self> {
+        let mut stream = stream;
+        let tls_connection = Self::receive_client_hello(&mut stream).await;
+        match tls_connection {
+            Ok(tls_connection) => Ok(Self {
+                stream,
+                inner: SocketConnection::TlsConnection(tls_connection),
+                buffer: Vec::new(),
+            }),
+            Err(TlsConnectionError::NotTlsConnection(header)) => Ok(Self {
+                stream,
+                inner: SocketConnection::TcpConnection,
+                buffer: header,
+            }),
+            Err(TlsConnectionError::Io(err)) => Err(err),
+        }
+    }
+
+    pub async fn bi_transmit<W>(&mut self, mut remote: W) -> std::io::Result<()>
+    where
+        W: AsyncRead + AsyncWrite + Unpin,
+    {
+        match &mut self.inner {
+            SocketConnection::TlsConnection(tls_connection) => {
+                tls_connection.write(&mut remote).await?
+            }
+            SocketConnection::TcpConnection => remote.write_all(&self.buffer).await?,
+        }
+        tokio::io::copy_bidirectional(&mut self.stream, &mut remote).await?;
+        Ok(())
+    }
 }
 
 #[derive(Debug)]
@@ -37,7 +76,8 @@ pub enum TlsConnectionError {
 
 #[derive(Debug)]
 pub struct TlsConnection {
-    pub version: u16,
+    pub protocol_version: u16,
+    pub client_version: u16,
     pub random: [u8; 32],
     pub session_id: Vec<u8>,
     pub cipher_suites: Vec<u16>,
@@ -46,6 +86,7 @@ pub struct TlsConnection {
 }
 
 impl TlsConnection {
+    const TLS_HANDSHAKE_RECORD: u8 = 0x16;
     const TLS_VERSION_VERIFICATION: u16 = 0x0300;
     const TLS_HANDSHAKE_CLIENT_HELLO: u8 = 0x01;
     const TLS_STRICT_LENGTH: usize = 512;
@@ -57,17 +98,34 @@ impl TlsConnection {
     }
 
     pub async fn read<R: AsyncRead + Unpin>(stream: &mut R) -> Result<Self, TlsConnectionError> {
-        let handshake_type = stream.read_u8().await?;
-        if handshake_type != Self::TLS_HANDSHAKE_CLIENT_HELLO {
-            return Err(TlsConnectionError::NotTlsConnection(vec![handshake_type]));
+        let mut pre_read = Vec::with_capacity(11);
+        let record_type = stream.read_u8().await?;
+        pre_read.push(record_type);
+        if record_type != Self::TLS_HANDSHAKE_RECORD {
+            return Err(TlsConnectionError::NotTlsConnection(pre_read));
         }
-        stream.read_u16().await?;
-        stream.read_u8().await?; // skip packet size
-        let version = stream.read_u16().await?;
-        if version & Self::TLS_VERSION_VERIFICATION != Self::TLS_VERSION_VERIFICATION {
-            return Err(TlsConnectionError::NotTlsConnection(
-                version.to_be_bytes().to_vec(),
-            ));
+        let protocol_version = stream.read_u16().await?;
+        pre_read.extend_from_slice(&protocol_version.to_be_bytes());
+        if protocol_version & Self::TLS_VERSION_VERIFICATION != Self::TLS_VERSION_VERIFICATION {
+            return Err(TlsConnectionError::NotTlsConnection(pre_read));
+        }
+        let record_len = stream.read_u16().await?;
+        pre_read.extend_from_slice(record_len.to_be_bytes().as_ref());
+        if record_len == 0 {
+            return Err(TlsConnectionError::NotTlsConnection(pre_read));
+        }
+        let handshake_type = stream.read_u8().await?;
+        pre_read.push(handshake_type);
+        if handshake_type != Self::TLS_HANDSHAKE_CLIENT_HELLO {
+            return Err(TlsConnectionError::NotTlsConnection(pre_read));
+        }
+        let mut packet_size = [0u8; 3];
+        stream.read_exact(&mut packet_size).await?; // ignore packet size
+        pre_read.extend_from_slice(&packet_size);
+        let client_version = stream.read_u16().await?;
+        pre_read.extend_from_slice(&client_version.to_be_bytes());
+        if client_version & Self::TLS_VERSION_VERIFICATION != Self::TLS_VERSION_VERIFICATION {
+            return Err(TlsConnectionError::NotTlsConnection(pre_read));
         }
         let mut random = [0u8; 32];
         stream.read_exact(&mut random).await?;
@@ -93,7 +151,8 @@ impl TlsConnection {
             }
         }
         Ok(Self {
-            version,
+            protocol_version,
+            client_version,
             random,
             session_id,
             cipher_suites,
@@ -109,11 +168,14 @@ impl TlsConnection {
         } else {
             len
         };
+        stream.write_u8(Self::TLS_HANDSHAKE_RECORD).await?;
+        stream.write_u16(self.protocol_version).await?;
+        stream.write_u16(packet_size as u16).await?;
         stream.write_u8(Self::TLS_HANDSHAKE_CLIENT_HELLO).await?;
         stream
             .write_all(&u32_to_tls_handshake_len((packet_size - 4) as u32))
             .await?; // remove handshake_type and handshake_len
-        stream.write_u16(self.version).await?;
+        stream.write_u16(self.client_version).await?;
         stream.write_all(&self.random).await?;
         stream.write_u8(self.session_id.len() as u8).await?;
         stream.write_all(&self.session_id).await?;
@@ -254,15 +316,16 @@ impl Extension {
 mod tests {
     use std::io::Cursor;
 
-    const TLS_HANDSHAKE_CLIENT_HELLO: [u8; 512] = [
-        0x01, 0x00, 0x01, 0xfc, 0x03, 0x03, 0x57, 0x16, 0xea, 0xce, 0xec, 0x93, 0x89, 0x5c, 0x4a,
-        0x18, 0xd3, 0x1c, 0x5f, 0x37, 0x9b, 0xb3, 0x05, 0xb4, 0x32, 0x08, 0x29, 0x39, 0xb8, 0x3e,
-        0xe0, 0x9f, 0x9a, 0x96, 0xba, 0xbe, 0x0a, 0x40, 0x00, 0x00, 0x02, 0x00, 0x33, 0x01, 0x00,
-        0x01, 0xd1, 0xff, 0x01, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x16, 0x00, 0x14, 0x00, 0x00,
-        0x11, 0x77, 0x77, 0x77, 0x2e, 0x77, 0x69, 0x6b, 0x69, 0x70, 0x65, 0x64, 0x69, 0x61, 0x2e,
-        0x6f, 0x72, 0x67, 0x00, 0x0d, 0x00, 0x12, 0x00, 0x10, 0x06, 0x01, 0x06, 0x03, 0x05, 0x01,
-        0x05, 0x03, 0x04, 0x01, 0x04, 0x03, 0x02, 0x01, 0x02, 0x03, 0x00, 0x0b, 0x00, 0x02, 0x01,
-        0x00, 0x00, 0x0a, 0x00, 0x06, 0x00, 0x04, 0x00, 0x17, 0x00, 0x18, 0x00, 0x15, 0x01, 0x88,
+    const TLS_HANDSHAKE_CLIENT_HELLO: [u8; 517] = [
+        0x16, 0x03, 0x01, 0x02, 0x00, 0x01, 0x00, 0x01, 0xfc, 0x03, 0x03, 0x57, 0x16, 0xea, 0xce,
+        0xec, 0x93, 0x89, 0x5c, 0x4a, 0x18, 0xd3, 0x1c, 0x5f, 0x37, 0x9b, 0xb3, 0x05, 0xb4, 0x32,
+        0x08, 0x29, 0x39, 0xb8, 0x3e, 0xe0, 0x9f, 0x9a, 0x96, 0xba, 0xbe, 0x0a, 0x40, 0x00, 0x00,
+        0x02, 0x00, 0x33, 0x01, 0x00, 0x01, 0xd1, 0xff, 0x01, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00,
+        0x16, 0x00, 0x14, 0x00, 0x00, 0x11, 0x77, 0x77, 0x77, 0x2e, 0x77, 0x69, 0x6b, 0x69, 0x70,
+        0x65, 0x64, 0x69, 0x61, 0x2e, 0x6f, 0x72, 0x67, 0x00, 0x0d, 0x00, 0x12, 0x00, 0x10, 0x06,
+        0x01, 0x06, 0x03, 0x05, 0x01, 0x05, 0x03, 0x04, 0x01, 0x04, 0x03, 0x02, 0x01, 0x02, 0x03,
+        0x00, 0x0b, 0x00, 0x02, 0x01, 0x00, 0x00, 0x0a, 0x00, 0x06, 0x00, 0x04, 0x00, 0x17, 0x00,
+        0x18, 0x00, 0x15, 0x01, 0x88, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
         0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
         0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
         0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
@@ -288,14 +351,13 @@ mod tests {
         0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
         0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
         0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-        0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
     ];
     #[tokio::test]
     async fn test_read_tls_connection() {
         let mut stream = Cursor::new(TLS_HANDSHAKE_CLIENT_HELLO);
         let tls_connection = super::TlsConnection::read(&mut stream).await.unwrap();
-        assert_eq!(tls_connection.version, 0x0303);
+        assert_eq!(tls_connection.client_version, 0x0303);
         assert_eq!(tls_connection.session_id.len(), 0);
         assert_eq!(tls_connection.cipher_suites.len(), 1);
         assert_eq!(tls_connection.compression_methods.len(), 1);
@@ -320,7 +382,7 @@ mod tests {
     async fn test_write_tls_connection() {
         let mut stream = Cursor::new(TLS_HANDSHAKE_CLIENT_HELLO);
         let tls_connection = super::TlsConnection::read(&mut stream).await.unwrap();
-        let mut stream = vec![0u8; 512];
+        let mut stream = vec![0u8; 517];
         let mut writer = Cursor::new(stream.as_mut_slice());
         tls_connection.write(&mut writer).await.unwrap();
         assert_eq!(stream, TLS_HANDSHAKE_CLIENT_HELLO);

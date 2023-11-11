@@ -116,7 +116,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_lookup_ipv6() {
-        let config = ResolverConfig::google_tls();
+        let config = ResolverConfig::quad9_tls();
         let resolver = DnsResolver::new(config, true);
         let ip = resolver.lookup("ipv6.lookup.test-ipv6.com").await.unwrap();
         assert!(
